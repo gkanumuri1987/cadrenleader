@@ -259,11 +259,34 @@ test("event workflow validates state and blocks missing permits", async (t) => {
     ).status,
     409,
   );
-  for (const status of ["ready", "active", "completed", "closed"])
+  for (const status of ["ready", "active", "completed"])
     assert.equal(
       (await request("events/clean-drive/status", { status }, leader)).status,
       200,
     );
+  assert.equal(
+    (await request("events/clean-drive/status", { status: "closed" }, leader))
+      .status,
+    409,
+  );
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/outcome",
+        {
+          summary: "Collected and sorted litter from the park.",
+          followUp: "Ravi will arrange collection tomorrow.",
+        },
+        leader,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await request("events/clean-drive/status", { status: "closed" }, leader))
+      .status,
+    200,
+  );
   assert.equal(
     (await request("events/clean-drive/rsvp", { going: true }, leader)).status,
     409,
@@ -399,4 +422,361 @@ test("unit journey visibility respects consent and organization scope", async (t
       .length,
     1,
   );
+});
+
+test("event permission evidence gates readiness, is rechecked on start, and revisions are retained", async (t) => {
+  const { request, db, leader, member, other } = await fixture(t);
+  const eid = (
+    await request(
+      "events",
+      {
+        unit: "vijayawada",
+        title: "Community gathering",
+        description: "An event requiring permission",
+        venue: "Community square",
+        date: "2035-01-01T12:00:00Z",
+        capacity: 30,
+        requiresPermit: true,
+      },
+      leader,
+    )
+  ).data.id;
+  const decision = {
+    status: "approved",
+    issuer: "Community authority",
+    reference: "PERMIT-123",
+    validUntil: "2035-01-02T12:00:00Z",
+    conditions: "Use the north entrance.",
+    confirmed: true,
+  };
+  assert.equal(
+    (await request(`events/${eid}/permit`, decision, member)).status,
+    403,
+  );
+  assert.equal(
+    (await request(`events/${eid}/permit`, decision, other)).status,
+    404,
+  );
+  assert.equal(
+    (
+      await request(
+        `events/${eid}/permit`,
+        { ...decision, validUntil: "2034-01-01T00:00:00Z" },
+        leader,
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request(
+        `events/${eid}/permit`,
+        { ...decision, confirmed: false },
+        leader,
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (await request(`events/${eid}/permit`, decision, leader)).status,
+    200,
+  );
+  assert.equal(
+    (await request(`events/${eid}/status`, { status: "ready" }, leader)).status,
+    200,
+  );
+  db.prepare("UPDATE event_permits SET valid_until=? WHERE event=?").run(
+    "2020-01-01T00:00:00Z",
+    eid,
+  );
+  assert.equal(
+    (await request(`events/${eid}/status`, { status: "active" }, leader))
+      .status,
+    409,
+  );
+  assert.equal(
+    (await request(`events/${eid}/permit`, decision, leader)).status,
+    200,
+  );
+  assert.equal(
+    db
+      .prepare("SELECT count(*) n FROM event_permit_revisions WHERE event=?")
+      .get(eid).n,
+    1,
+  );
+  const detail = (await request(`events/${eid}`, null, member)).data;
+  assert.equal(detail.permit, null);
+  assert.equal(detail.permitValid, true);
+  assert.equal(detail.event.status, "published");
+  assert.equal((await request(`events/${eid}`, null, other)).status, 404);
+  assert.equal(
+    (
+      await request(
+        `events/${eid}/permit`,
+        { ...decision, status: "rejected", validUntil: null },
+        leader,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await request(`events/${eid}`, null, member)).data.permitValid,
+    false,
+  );
+});
+test("organizer attendance supports corrections, hides rosters, and locks after closure", async (t) => {
+  const { request, member, leader, other } = await fixture(t);
+  await request("events/clean-drive/rsvp", { going: true }, member);
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "member", present: true },
+        leader,
+      )
+    ).status,
+    409,
+  );
+  await request("events/clean-drive/status", { status: "ready" }, leader);
+  await request("events/clean-drive/status", { status: "active" }, leader);
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "member", present: true },
+        member,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "other", present: true },
+        leader,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "member", present: true },
+        other,
+      )
+    ).status,
+    404,
+  );
+  for (let i = 0; i < 2; i++)
+    assert.equal(
+      (
+        await request(
+          "events/clean-drive/attendance",
+          { user: "member", present: true },
+          leader,
+        )
+      ).status,
+      200,
+    );
+  let detail = (await request("events/clean-drive", null, member)).data;
+  assert.equal(detail.myAttendance, true);
+  assert.equal(detail.attendanceCount, 1);
+  assert.deepEqual(detail.attendees, []);
+  assert.equal(
+    (await request("events/clean-drive/rsvp", { going: false }, member)).status,
+    409,
+  );
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "member", present: false },
+        leader,
+      )
+    ).status,
+    200,
+  );
+  assert.equal(
+    (await request("events/clean-drive", null, leader)).data.attendanceCount,
+    0,
+  );
+  await request("events/clean-drive/status", { status: "completed" }, leader);
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/outcome",
+        { summary: "Event summary", followUp: "Follow-up plan" },
+        member,
+      )
+    ).status,
+    403,
+  );
+  await request(
+    "events/clean-drive/outcome",
+    {
+      summary: "Community volunteers collected 20 bags of litter.",
+      followUp: "Ravi will confirm collection tomorrow.",
+    },
+    leader,
+  );
+  await request("events/clean-drive/status", { status: "closed" }, leader);
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/attendance",
+        { user: "member", present: true },
+        leader,
+      )
+    ).status,
+    409,
+  );
+  assert.equal(
+    (await request("events/clean-drive", null, member)).data.outcome.summary,
+    "Community volunteers collected 20 bags of litter.",
+  );
+});
+test("cancellation announces its reason and disables new RSVP and assignments", async (t) => {
+  const { request, leader, member } = await fixture(t);
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/status",
+        { status: "cancelled" },
+        leader,
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await request(
+        "events/clean-drive/status",
+        {
+          status: "cancelled",
+          reason: "Unsafe weather forecast; rescheduling next week.",
+        },
+        leader,
+      )
+    ).status,
+    200,
+  );
+  const detail = (await request("events/clean-drive", null, member)).data;
+  assert.match(detail.cancellation.reason, /weather/);
+  assert.equal(
+    (await request("events/clean-drive/rsvp", { going: true }, member)).status,
+    409,
+  );
+  assert.equal(
+    (
+      await request(
+        "tasks",
+        {
+          unit: "vijayawada",
+          event: "clean-drive",
+          assignee: "member",
+          title: "New assignment",
+          due: "2030-01-01",
+        },
+        leader,
+      )
+    ).status,
+    409,
+  );
+  assert.match(
+    (await request("state", null, member)).data.posts[0].body,
+    /cancelled/,
+  );
+});
+test("task progress remains assignee-only and cannot overwrite submitted work", async (t) => {
+  const { request, member, leader, other } = await fixture(t);
+  assert.equal(
+    (
+      await request(
+        "tasks/welcome/progress",
+        { status: "blocked", note: "Waiting for access to the room." },
+        other,
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await request(
+        "tasks/welcome/progress",
+        { status: "blocked", note: "Waiting for access to the room." },
+        leader,
+      )
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await request(
+        "tasks/welcome/progress",
+        { status: "blocked", note: "Waiting for access to the room." },
+        member,
+      )
+    ).status,
+    200,
+  );
+  let task = (await request("state", null, leader)).data.tasks.find(
+    (t) => t.id === "welcome",
+  );
+  assert.equal(task.status, "blocked");
+  assert.match(task.progressNote, /room/);
+  assert.equal(
+    (
+      await request(
+        "tasks/welcome/progress",
+        { status: "in_progress", note: "Access provided; setting up." },
+        member,
+      )
+    ).status,
+    200,
+  );
+  await request(
+    "contributions",
+    { task: "welcome", summary: "Welcome desk completed." },
+    member,
+  );
+  assert.equal(
+    (
+      await request(
+        "tasks/welcome/progress",
+        { status: "open", note: "Trying to overwrite submission" },
+        member,
+      )
+    ).status,
+    409,
+  );
+});
+test("request validation rejects ambiguous booleans and impossible calendar dates", async (t) => {
+  const { request, leader, member } = await fixture(t);
+  assert.equal(
+    (await request("events/clean-drive/rsvp", { going: "false" }, member))
+      .status,
+    400,
+  );
+  assert.equal(
+    (
+      await request(
+        "tasks",
+        {
+          unit: "vijayawada",
+          assignee: "member",
+          title: "Test",
+          due: "2030-02-30",
+        },
+        leader,
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (await request("tasks", { title: "Missing identifiers" }, leader)).status,
+    400,
+  );
+  assert.equal((await request("profile", [], member)).status, 400);
 });

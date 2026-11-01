@@ -26,3 +26,15 @@ All endpoints return JSON. Errors use `{ "error": "Human-readable message" }` wi
 | POST   | `/api/v1/contributions/review` | Other leader: `{id,status:"verified" or "returned",note}`                                                  |
 
 Event dates use ISO 8601 timestamps with an explicit UTC offset. The browser converts local date/time input to UTC and renders stored times in the viewer’s timezone. A venue-specific timezone selector is future work; cross-region organizers must confirm the intended local time. Date-only task deadlines are interpreted as calendar dates. Responses currently have bounded pilot scope rather than pagination; add pagination before large deployments.
+
+## Version 0.2 additions
+
+| Method | Endpoint                        | Purpose                                                                                                                                                                                                                                           |
+| ------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| GET    | `/api/v1/events/:id`            | Scoped workspace with outcome, own attendance and aggregate counts. Appointed leaders additionally receive attendee names, permission evidence and the event activity log.                                                                        |
+| POST   | `/api/v1/events/:id/attendance` | Leader records/corrects `{user,present:boolean}` for an active RSVP while the event is active or completed. Locked after closure.                                                                                                                 |
+| POST   | `/api/v1/events/:id/permit`     | Leader records `{status:"approved" or "rejected",issuer,reference,validUntil,conditions,confirmed:true}` before start. Approval requires validity through the event date/current time. Re-review resets readiness and retains the prior decision. |
+| POST   | `/api/v1/events/:id/outcome`    | Leader saves `{summary,followUp}` after completion. Both are required before closure.                                                                                                                                                             |
+| POST   | `/api/v1/tasks/:id/progress`    | Assignee updates `{status:"open" or "in_progress" or "blocked",note}` before submission.                                                                                                                                                          |
+
+Cancellation now requires `{status:"cancelled",reason}` and creates an official team update. RSVP changes are closed for cancelled/completed/closed events; checked-in attendees require an organizer correction before withdrawing. Cancelled/closed events cannot receive new task assignments. Clients must send actual JSON booleans, and write bodies must be objects. Calendar dates are validated rather than silently normalized.

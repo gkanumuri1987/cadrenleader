@@ -1,3 +1,4 @@
+import { eventWorkflows } from "./event-workflows.mjs";
 import http from "node:http";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -53,7 +54,17 @@ export function createApp({
  CREATE TABLE IF NOT EXISTS contribution_revisions(id TEXT PRIMARY KEY,contribution TEXT REFERENCES contributions(id),actor TEXT REFERENCES users(id),summary TEXT,status TEXT,note TEXT,created TEXT);
  CREATE TABLE IF NOT EXISTS posts(id TEXT PRIMARY KEY,unit TEXT REFERENCES units(id),user TEXT REFERENCES users(id),body TEXT NOT NULL,official INTEGER DEFAULT 0,created TEXT NOT NULL);
  CREATE TABLE IF NOT EXISTS invitations(token TEXT PRIMARY KEY,unit TEXT REFERENCES units(id),creator TEXT REFERENCES users(id),expires INTEGER NOT NULL,used INTEGER DEFAULT 0);
+ CREATE TABLE IF NOT EXISTS attendance(event TEXT REFERENCES events(id),user TEXT REFERENCES users(id),present INTEGER NOT NULL,recorder TEXT REFERENCES users(id),updated TEXT NOT NULL,PRIMARY KEY(event,user));
+ CREATE TABLE IF NOT EXISTS event_permits(event TEXT PRIMARY KEY REFERENCES events(id),status TEXT NOT NULL,issuer TEXT NOT NULL,reference TEXT NOT NULL,valid_until TEXT NOT NULL,conditions TEXT NOT NULL,reviewer TEXT REFERENCES users(id),reviewed TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS event_permit_revisions(id TEXT PRIMARY KEY,event TEXT REFERENCES events(id),record TEXT NOT NULL,actor TEXT REFERENCES users(id),created TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS event_outcomes(event TEXT PRIMARY KEY REFERENCES events(id),summary TEXT NOT NULL,follow_up TEXT NOT NULL,author TEXT REFERENCES users(id),updated TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS event_cancellations(event TEXT PRIMARY KEY REFERENCES events(id),reason TEXT NOT NULL,actor TEXT REFERENCES users(id),created TEXT NOT NULL);
+ CREATE TABLE IF NOT EXISTS task_updates(id TEXT PRIMARY KEY,task TEXT REFERENCES tasks(id),actor TEXT REFERENCES users(id),status TEXT NOT NULL,note TEXT NOT NULL,created TEXT NOT NULL);
+ CREATE INDEX IF NOT EXISTS events_unit_date ON events(unit,date);
+ CREATE INDEX IF NOT EXISTS tasks_unit_assignee ON tasks(unit,assignee);
+ CREATE INDEX IF NOT EXISTS memberships_user_status ON memberships(user,status);
  CREATE TABLE IF NOT EXISTS audit(id TEXT PRIMARY KEY,actor TEXT,action TEXT,object TEXT,created TEXT);
+ CREATE INDEX IF NOT EXISTS audit_object_created ON audit(object,created);
  `);
   const get = (q, ...args) => db.prepare(q).get(...args);
   const all = (q, ...args) => db.prepare(q).all(...args);
@@ -256,7 +267,29 @@ export function createApp({
     );
     return v.trim();
   };
+  const workflows = eventWorkflows({
+    get,
+    all,
+    run,
+    transaction,
+    scope,
+    lead,
+    member,
+    audit,
+    assert,
+    text,
+    id,
+    now,
+  });
   const rates = new Map();
+  function rateLimit(key, limit = 30) {
+    for (const [k, value] of rates)
+      if (value.until < Date.now()) rates.delete(k);
+    assert(rates.size < 10000 || rates.has(key), 429, "Please try again later");
+    const r = rates.get(key) || { n: 0, until: Date.now() + 900000 };
+    rates.set(key, r);
+    assert(++r.n <= limit, 429, "Too many attempts. Try again in 15 minutes.");
+  }
   const server = http.createServer(async (req, res) => {
     const send = (status, data, headers = {}) => {
       res.writeHead(status, {
@@ -281,11 +314,12 @@ export function createApp({
         const files = {
           "/": "index.html",
           "/app.js": "app.js",
+          "/form-payloads.js": "form-payloads.js",
           "/style.css": "style.css",
           "/manifest.webmanifest": "manifest.webmanifest",
           "/icon.svg": "icon.svg",
         };
-        assert(files[path], 404, "Not found");
+        assert(Object.hasOwn(files, path), 404, "Not found");
         const file = files[path];
         const types = {
           html: "text/html",
@@ -325,6 +359,26 @@ export function createApp({
           throw new Failure(400, "Invalid JSON");
         }
       }
+      if (req.method !== "GET") {
+        assert(
+          body && typeof body === "object" && !Array.isArray(body),
+          400,
+          "Send a JSON object",
+        );
+        const required =
+          {
+            "/api/v1/invitations": ["unit"],
+            "/api/v1/join": ["unit"],
+            "/api/v1/leave": ["unit"],
+            "/api/v1/membership/approve": ["unit", "user"],
+            "/api/v1/posts": ["unit"],
+            "/api/v1/events": ["unit"],
+            "/api/v1/tasks": ["unit", "assignee"],
+            "/api/v1/contributions": ["task"],
+            "/api/v1/contributions/review": ["id"],
+          }[path] || [];
+        for (const key of required) text(body[key], key, 128);
+      }
       if (path === "/api/v1/invitation" && req.method === "GET") {
         const inv = get(
           "SELECT i.*,u.name team FROM invitations i JOIN units u ON u.id=i.unit WHERE token=? AND used=0 AND expires>?",
@@ -344,6 +398,7 @@ export function createApp({
       if (path === "/api/v1/config" && req.method === "GET")
         return send(200, { demo });
       if (path === "/api/v1/accept-invitation" && req.method === "POST") {
+        rateLimit(`invite:${req.socket.remoteAddress}`, 20);
         const name = text(body.name, "Display name", 80),
           email = text(body.email, "Email", 254).toLowerCase();
         assert(
@@ -395,20 +450,24 @@ export function createApp({
         return send(201, { ok: true }, { "Set-Cookie": sessionCookie(token) });
       }
       if (path === "/api/v1/login" && req.method === "POST") {
-        const ip = req.socket.remoteAddress;
-        const r = rates.get(ip) || { n: 0, until: Date.now() + 900000 };
-        if (r.until < Date.now()) {
-          r.n = 0;
-          r.until = Date.now() + 900000;
-        }
-        rates.set(ip, r);
-        assert(++r.n <= 30, 429, "Too many attempts. Try again in 15 minutes.");
+        rateLimit(`login:${req.socket.remoteAddress}`);
+        assert(
+          body.demoRole ||
+            (typeof body.email === "string" &&
+              typeof body.password === "string" &&
+              body.password.length <= 128),
+          400,
+          "Enter your email and password",
+        );
+        run("DELETE FROM sessions WHERE expires<=?", Date.now());
         const user =
           demo && ["member", "leader"].includes(body.demoRole)
             ? get("SELECT * FROM users WHERE id=?", body.demoRole)
             : get(
                 "SELECT * FROM users WHERE email=?",
-                String(body.email || "").toLowerCase(),
+                String(body.email || "")
+                  .trim()
+                  .toLowerCase(),
               );
         assert(
           user &&
@@ -470,7 +529,7 @@ export function createApp({
             : [],
           tasks: unit
             ? all(
-                `SELECT t.*,u.name assigneeName,e.title eventTitle FROM tasks t JOIN users u ON t.assignee=u.id LEFT JOIN events e ON e.id=t.event WHERE t.unit=? AND (t.assignee=? OR ?=1) ORDER BY due`,
+                `SELECT t.*,u.name assigneeName,e.title eventTitle,e.status eventStatus,(SELECT note FROM task_updates tu WHERE tu.task=t.id ORDER BY tu.created DESC,tu.rowid DESC LIMIT 1) progressNote FROM tasks t JOIN users u ON t.assignee=u.id LEFT JOIN events e ON e.id=t.event WHERE t.unit=? AND (t.assignee=? OR ?=1) ORDER BY due`,
                 unit,
                 uid,
                 leader(uid, unit) ? 1 : 0,
@@ -596,7 +655,7 @@ export function createApp({
             body.unit,
           );
           run(
-            "DELETE FROM rsvps WHERE user=? AND event IN (SELECT id FROM events WHERE unit=?)",
+            "DELETE FROM rsvps WHERE user=? AND event IN (SELECT id FROM events WHERE unit=? AND status IN ('published','ready','active'))",
             uid,
             body.unit,
           );
@@ -642,6 +701,11 @@ export function createApp({
       }
       if (path === "/api/v1/posts" && req.method === "POST") {
         scope(uid, body.unit);
+        assert(
+          typeof body.official === "boolean",
+          400,
+          "Choose a posting identity",
+        );
         if (body.official) lead(uid, body.unit);
         run(
           "INSERT INTO posts VALUES(?,?,?,?,?,?)",
@@ -673,6 +737,11 @@ export function createApp({
           400,
           "Capacity must be 1–10,000",
         );
+        assert(
+          typeof body.requiresPermit === "boolean",
+          400,
+          "Specify whether a permit is required",
+        );
         const eid = id();
         run(
           "INSERT INTO events(id,unit,owner,title,description,venue,date,capacity,permit) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -682,63 +751,51 @@ export function createApp({
           title,
           text(body.description, "Description"),
           venue,
-          date,
+          new Date(date).toISOString(),
           body.capacity,
           body.requiresPermit ? "pending" : "not_required",
         );
         audit(uid, "event.created", eid);
         return send(201, { id: eid });
       }
-      const eventMatch = path.match(
-        /^\/api\/v1\/events\/([a-z0-9-]+)\/(rsvp|status)$/,
+      if (await workflows({ path, method: req.method, body, uid, send }))
+        return;
+      const progressMatch = path.match(
+        /^\/api\/v1\/tasks\/([a-z0-9-]+)\/progress$/,
       );
-      if (eventMatch && req.method === "POST") {
-        const [, eid, action] = eventMatch;
-        const e = get("SELECT * FROM events WHERE id=?", eid);
-        assert(e, 404, "Event unavailable");
-        scope(uid, e.unit);
-        if (action === "rsvp")
-          transaction(() => {
-            assert(
-              !["cancelled", "closed", "completed"].includes(e.status),
-              409,
-              "This event is no longer accepting RSVPs",
-            );
-            if (body.going) {
-              assert(
-                get(
-                  "SELECT user FROM rsvps WHERE event=? AND user=?",
-                  eid,
-                  uid,
-                ) ||
-                  get("SELECT count(*) n FROM rsvps WHERE event=?", eid).n <
-                    e.capacity,
-                409,
-                "This event is full",
-              );
-              run("INSERT OR IGNORE INTO rsvps VALUES(?,?)", eid, uid);
-            } else run("DELETE FROM rsvps WHERE event=? AND user=?", eid, uid);
-          });
-        else {
-          lead(uid, e.unit);
-          const next =
-            {
-              published: ["ready", "cancelled"],
-              ready: ["active", "cancelled"],
-              active: ["completed", "cancelled"],
-              completed: ["closed"],
-            }[e.status] || [];
-          assert(next.includes(body.status), 409, "Invalid event transition");
-          assert(
-            body.status !== "ready" ||
-              e.permit === "not_required" ||
-              e.permit === "approved",
-            409,
-            "Required permit evidence must be verified before this event is ready",
+      if (progressMatch && req.method === "POST") {
+        const task = get("SELECT * FROM tasks WHERE id=?", progressMatch[1]);
+        assert(task, 404, "Task unavailable");
+        scope(uid, task.unit);
+        assert(
+          task.assignee === uid,
+          403,
+          "Only the assigned member can update progress",
+        );
+        assert(
+          ["open", "in_progress", "blocked"].includes(task.status),
+          409,
+          "Reviewed or submitted work cannot be changed here",
+        );
+        assert(
+          ["open", "in_progress", "blocked"].includes(body.status),
+          400,
+          "Choose a valid progress state",
+        );
+        const note = text(body.note, "Progress update", 1000);
+        transaction(() => {
+          run("UPDATE tasks SET status=? WHERE id=?", body.status, task.id);
+          run(
+            "INSERT INTO task_updates VALUES(?,?,?,?,?,?)",
+            id(),
+            task.id,
+            uid,
+            body.status,
+            note,
+            now(),
           );
-          run("UPDATE events SET status=? WHERE id=?", body.status, eid);
-          audit(uid, "event." + body.status, eid);
-        }
+          audit(uid, "task." + body.status, task.id);
+        });
         return send(200, { ok: true });
       }
       if (path === "/api/v1/tasks" && req.method === "POST") {
@@ -749,15 +806,22 @@ export function createApp({
           "Assignee must be an active team member",
         );
         const e =
-          body.event && get("SELECT unit FROM events WHERE id=?", body.event);
+          body.event &&
+          get("SELECT unit,status FROM events WHERE id=?", body.event);
         assert(
           !body.event || e?.unit === body.unit,
           400,
           "Event must belong to your team",
         );
         assert(
+          !e || !["closed", "cancelled"].includes(e.status),
+          409,
+          "Choose an event that is still open for work",
+        );
+        assert(
           /^\d{4}-\d{2}-\d{2}$/.test(body.due || "") &&
-            Number.isFinite(Date.parse(body.due)),
+            Number.isFinite(Date.parse(body.due)) &&
+            new Date(body.due).toISOString().slice(0, 10) === body.due,
           400,
           "Choose a due date",
         );
