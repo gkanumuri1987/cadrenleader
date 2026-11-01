@@ -1,3 +1,4 @@
+import { formPayload } from "./form-payloads.js";
 const $ = (s) => document.querySelector(s);
 const esc = (s) =>
   String(s ?? "").replace(
@@ -23,6 +24,12 @@ const labels = {
   community: "My community",
   review: "Review queue",
 };
+let searchQuery = "",
+  workView = "list",
+  eventDetail = null,
+  routeVersion = 0,
+  toastTimer,
+  nextFilter = null;
 let state,
   page = location.hash.slice(1) || "home",
   filter = "all",
@@ -32,11 +39,13 @@ let state,
 const inviteToken = new URLSearchParams(location.search).get("invite");
 const unit = () => state?.units[0];
 const initials = (name) =>
-  name
-    .split(" ")
-    .map((n) => n[0])
-    .slice(0, 2)
-    .join("");
+  esc(
+    name
+      .split(" ")
+      .map((n) => n[0])
+      .slice(0, 2)
+      .join(""),
+  );
 const date = (value, options = { month: "short", day: "numeric" }) =>
   new Date(value.length === 10 ? value + "T12:00" : value).toLocaleDateString(
     "en-IN",
@@ -55,25 +64,85 @@ async function api(path, body) {
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
-  const data = await r.json();
-  if (!r.ok) throw new Error(data.error || "Request failed");
+  let data;
+  try {
+    data = await r.json();
+  } catch {
+    throw new Error("The server could not respond. Please try again.");
+  }
+  if (!r.ok) {
+    const error = new Error(data.error || "Request failed");
+    error.status = r.status;
+    throw error;
+  }
   return data;
 }
 function toast(message) {
   $("#toast").textContent = message;
   $("#toast").classList.add("show");
-  setTimeout(() => $("#toast").classList.remove("show"), 4500);
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $("#toast").classList.remove("show"), 4500);
 }
+const pageSection = () => (page.startsWith("event/") ? "events" : page);
+const eventId = () => (page.startsWith("event/") ? page.slice(6) : null);
+const searchable = (...parts) =>
+  parts.join(" ").toLowerCase().includes(searchQuery.toLowerCase().trim());
+const openTask = (t) => ["open", "in_progress", "blocked"].includes(t.status);
+const today = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+};
+const upcomingEvent = (e) =>
+  ["published", "ready", "active"].includes(e.status) &&
+  (Date.parse(e.date) >= Date.now() || e.status === "active");
+const canRSVP = (e) => ["published", "ready", "active"].includes(e.status);
 async function refresh() {
-  state = await api("state");
+  const version = ++routeVersion;
+  const nextState = await api("state");
+  let detail = null;
+  if (eventId()) {
+    try {
+      detail = await api("events/" + encodeURIComponent(eventId()));
+    } catch (error) {
+      if (version !== routeVersion) return;
+      if (![403, 404].includes(error.status)) throw error;
+      page = "events";
+      history.replaceState(null, "", "#events");
+      toast(error.message);
+    }
+  }
+  if (version !== routeVersion) return;
+  state = nextState;
+  eventDetail = detail;
   render();
 }
-function navigate(next) {
-  page = next;
-  filter = "all";
+async function changeRoute() {
+  page = location.hash.slice(1) || "home";
+  filter = nextFilter || "all";
+  nextFilter = null;
+  searchQuery = "";
+  if (!state) return;
+  try {
+    if (eventId()) {
+      $("#main").innerHTML =
+        '<div class="loading-state" role="status">Opening event workspace…</div>';
+      await refresh();
+    } else {
+      ++routeVersion;
+      eventDetail = null;
+      render();
+    }
+    $("#main")?.focus();
+    window.scrollTo(0, 0);
+  } catch (err) {
+    toast(err.message);
+    navigate("events");
+  }
+}
+function navigate(next, selectedFilter = null) {
+  nextFilter = selectedFilter;
+  if (location.hash.slice(1) === next) return changeRoute();
   location.hash = next;
-  render();
-  $("#main")?.focus();
 }
 function button(label, action, extra = "") {
   return `<button class="button ${extra}" data-action="${action}">${label}</button>`;
@@ -84,45 +153,45 @@ function empty(title, detail) {
 function login() {
   if (invitation) return inviteScreen();
   $("#app").innerHTML =
-    `<div class="login"><div class="login-story"><a class="brand" href="/"><img src="/icon.svg" alt=""><span>cadre<span class="brand-light">&</span>leader</span></a><div><p class="eyebrow">PEOPLE. PURPOSE. PROGRESS.</p><h1>Great things happen<br>when we show up.<span> Together.</span></h1><p>A place to connect with your community, do meaningful work, and keep a record of the difference you make.</p><div class="login-art" aria-hidden="true"><div class="art-ring"></div><span class="art-leaf">✳</span><span class="art-circle">↗</span><div class="art-card">Small actions.<br><strong>Lasting impact.</strong></div></div></div><small>Built around people. Rooted in trust.</small></div><div class="login-form"><div class="login-inner"><span class="pill">YOUR COMMUNITY WORKSPACE</span><h2>Welcome to your next chapter.</h2><p>Sign in to pick up where your team left off.</p><form id="login-form"><label>Email address<input name="email" type="email" autocomplete="username" placeholder="you@example.com" required></label><label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label><p class="form-error" role="alert"></p><button class="button primary wide">Sign in <span>→</span></button></form>${config.demo ? `<div class="demo-panel"><strong>Explore the working demo</strong><p>Synthetic people and sample events. Changes persist in this demo database.</p><button class="button secondary wide" data-action="login-member">Explore as a member →</button><button class="text-button" data-action="login-leader">Open leader workspace</button></div>` : '<p class="fine">Need access? Contact your organization administrator. Public registration and password recovery are not yet available.</p>'}${invitationError ? '<p class="form-error">' + esc(invitationError) + "</p>" : ""}<p class="fine">Your membership is voluntary. Your contributions are yours.</p></div></div></div>`;
+    `<div class="login"><div class="login-story"><a class="brand" href="/"><img src="/icon.svg" alt=""><span>cadre<span class="brand-light">&</span>leader</span></a><div><p class="eyebrow">PEOPLE. PURPOSE. PROGRESS.</p><h1>Great things happen<br>when we show up.<span> Together.</span></h1><p>A place to connect with your community, do meaningful work, and keep a record of the difference you make.</p><div class="login-art" aria-hidden="true"><div class="art-ring"></div><span class="art-leaf">✳</span><span class="art-circle">↗</span><div class="art-card">Small actions.<br><strong>Lasting impact.</strong></div></div></div><small>Built around people. Rooted in trust.</small></div><div class="login-form" id="main" tabindex="-1"><div class="login-inner"><span class="pill">YOUR COMMUNITY WORKSPACE</span><h2>Welcome to your next chapter.</h2><p>Sign in to pick up where your team left off.</p><form id="login-form"><label>Email address<input name="email" type="email" autocomplete="username" placeholder="you@example.com" required></label><label>Password<input name="password" type="password" autocomplete="current-password" placeholder="Enter your password" required></label><p class="form-error" role="alert"></p><button class="button primary wide">Sign in <span>→</span></button></form>${config.demo ? `<div class="demo-panel"><strong>Explore the working demo</strong><p>Synthetic people and sample events. Changes persist in this demo database.</p><button class="button secondary wide" data-action="login-member">Explore as a member →</button><button class="text-button" data-action="login-leader">Open leader workspace</button></div>` : '<p class="fine">Need access? Contact your organization administrator. Public registration and password recovery are not yet available.</p>'}${invitationError ? '<p class="form-error">' + esc(invitationError) + "</p>" : ""}<p class="fine">Your membership is voluntary. Your contributions are yours.</p></div></div></div>`;
 }
 function render() {
   if (!state) return login();
-  if (!labels[page] || (page === "review" && !unit()?.isLeader)) page = "home";
+  if (!labels[pageSection()] || (page === "review" && !unit()?.isLeader))
+    page = "home";
   const u = unit();
   const count = pending().length;
   $("#app").innerHTML =
-    `<div class="app-layout"><aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="/icon.svg" alt=""><span>cadre<span class="brand-light">&</span>leader</span></a><div class="workspace-label">YOUR WORKSPACE</div><div class="team-switch"><span class="team-icon">VC</span><div><strong>${esc(u?.name || "Personal workspace")}</strong><small>${u?.isLeader ? "Leader workspace" : "Member workspace"}</small></div></div><nav aria-label="Main navigation">${Object.entries(
+    `<div class="app-layout"><aside class="sidebar"><a class="brand" href="#home" data-nav="home"><img src="/icon.svg" alt=""><span>cadre<span class="brand-light">&</span>leader</span></a><div class="workspace-label">YOUR WORKSPACE</div><div class="team-switch"><span class="team-icon">${initials(u?.name || "Personal")}</span><div><strong>${esc(u?.name || "Personal workspace")}</strong><small>${u?.isLeader ? "Leader workspace" : "Member workspace"}</small></div></div><nav aria-label="Main navigation">${Object.entries(
       labels,
     )
       .filter(([key]) => key !== "review" || u?.isLeader)
       .map(
         ([key, label]) =>
-          `<a href="#${key}" data-nav="${key}" class="nav-item ${page === key ? "active" : ""}" ${page === key ? 'aria-current="page"' : ""}><span class="nav-icon" aria-hidden="true">${icons[key]}</span>${label}${key === "review" && count ? `<b>${count}</b>` : ""}</a>`,
+          `<a href="#${key}" data-nav="${key}" class="nav-item ${pageSection() === key ? "active" : ""}" ${pageSection() === key ? 'aria-current="page"' : ""}><span class="nav-icon" aria-hidden="true">${icons[key]}</span>${label}${key === "review" && count ? `<b>${count}</b>` : ""}</a>`,
       )
       .join(
         "",
-      )}</nav><div class="sidebar-bottom"><div class="purpose-note"><span>✳</span><strong>A little effort.<br>A bigger difference.</strong><p>Every contribution has a story. Make yours count.</p></div><button class="user-card" data-action="profile"><span class="avatar">${initials(state.user.name)}</span><span><strong>${esc(state.user.name)}</strong><small>Account & privacy</small></span><span>⌄</span></button><button class="text-button logout" data-action="logout">Sign out</button></div></aside><div class="main-wrap"><header class="topbar"><span>Workspace <span class="crumb">/</span> <strong>${labels[page]}</strong></span><div class="topbar-right">${state.demo ? '<span class="demo-label">DEMO WORKSPACE</span>' : ""}<span class="privacy-tag">◈ Private team</span><button class="avatar small account-button" aria-label="Account and privacy" data-action="profile">${initials(state.user.name)}</button></div></header><nav class="mobile-nav" aria-label="Mobile navigation">${["home", "events", "work", "journey", "community", ...(u?.isLeader ? ["review"] : [])].map((k) => `<a href="#${k}" data-nav="${k}" class="${k === page ? "active" : ""}"><span>${icons[k]}</span>${k === "home" ? "Home" : k === "community" ? "Team" : k === "review" ? "Review" : labels[k].replace("My ", "")}</a>`).join("")}</nav><main id="main" tabindex="-1">${{ home: home, events: events, work: work, journey: journey, community: community, review: review }[page]()}</main><footer>Made for meaningful participation.<span>Membership is always your choice.</span></footer></div></div>`;
+      )}</nav><div class="sidebar-bottom"><div class="purpose-note"><span>✳</span><strong>A little effort.<br>A bigger difference.</strong><p>Every contribution has a story. Make yours count.</p></div><button class="user-card" data-action="profile"><span class="avatar">${initials(state.user.name)}</span><span><strong>${esc(state.user.name)}</strong><small>Account & privacy</small></span><span>⌄</span></button><button class="text-button logout" data-action="logout">Sign out</button></div></aside><div class="main-wrap"><header class="topbar"><span>Workspace <span class="crumb">/</span> <strong>${labels[pageSection()]}</strong></span><div class="topbar-right">${state.demo ? '<span class="demo-label">DEMO WORKSPACE</span>' : ""}<span class="privacy-tag">◈ Private team</span><button class="avatar small account-button" aria-label="Account and privacy" data-action="profile">${initials(state.user.name)}</button></div></header><nav class="mobile-nav" aria-label="Mobile navigation">${["home", "events", "work", "journey", "community", ...(u?.isLeader ? ["review"] : [])].map((k) => `<a href="#${k}" data-nav="${k}" class="${k === pageSection() ? "active" : ""}"><span>${icons[k]}</span>${k === "home" ? "Home" : k === "community" ? "Team" : k === "review" ? "Review" : labels[k].replace("My ", "")}</a>`).join("")}</nav><main id="main" tabindex="-1">${eventId() ? eventWorkspace() : { home, events, work, journey, community, review }[page]()}</main><footer>Made for meaningful participation.<span>Membership is always your choice.</span></footer></div></div>`;
 }
 function heading(kicker, title, subtitle, action = "") {
   return `<div class="page-heading"><div><p class="eyebrow">${kicker}</p><h1>${title}</h1><p>${subtitle}</p></div>${action}</div>`;
 }
 function eventCard(e, compact = false) {
-  return `<article class="event-card ${compact ? "compact" : ""}"><div class="event-visual ${e.id === "team-circle" ? "blue" : ""}"><div class="date-tile"><strong>${new Date(e.date).getDate()}</strong><span>${date(e.date, { month: "short" }).toUpperCase()}</span></div><span class="event-art" aria-hidden="true">${e.id === "team-circle" ? "◌" : "✳"}</span><span class="event-kind">${e.permit === "pending" ? "PRELIMINARY · PERMIT PENDING" : "COMMUNITY"}</span></div><div class="event-content"><div class="event-meta">${esc(date(e.date, { weekday: "short", month: "short", day: "numeric" }))} <span>·</span> ${new Date(e.date).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</div><h3><button class="title-button" data-action="event" data-id="${e.id}">${esc(e.title)}</button></h3><p class="venue">⌖ ${esc(e.venue)}</p><div class="event-bottom"><span><span class="tiny-avatar">${e.attending ? "✓" : "♙"}</span> ${e.attending} / ${e.capacity} attending</span><button class="${e.going ? "going" : "rsvp-button"}" data-action="rsvp" data-id="${e.id}">${e.going ? "✓ Going" : "RSVP ↗"}</button></div></div></article>`;
+  return `<article class="event-card ${compact ? "compact" : ""}"><div class="event-visual ${e.id === "team-circle" ? "blue" : ""}"><div class="date-tile"><strong>${new Date(e.date).getDate()}</strong><span>${date(e.date, { month: "short" }).toUpperCase()}</span></div><span class="event-art" aria-hidden="true">${e.id === "team-circle" ? "◌" : "✳"}</span><span class="event-kind">${e.permit === "pending" ? "PRELIMINARY · PERMIT PENDING" : "COMMUNITY"}</span></div><div class="event-content"><div class="event-meta">${esc(date(e.date, { weekday: "short", month: "short", day: "numeric" }))} <span>·</span> ${new Date(e.date).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</div><h3><button class="title-button" data-action="event" data-id="${e.id}">${esc(e.title)}</button></h3><p class="venue">⌖ ${esc(e.venue)}</p><div class="event-bottom"><span><span class="tiny-avatar">${e.attending ? "✓" : "♙"}</span> ${e.attending} / ${e.capacity} attending</span><button class="${e.going ? "going" : "rsvp-button"}" data-action="${canRSVP(e) ? "rsvp" : "event"}" data-id="${e.id}">${canRSVP(e) ? (e.going ? "✓ Going" : "RSVP ↗") : esc(e.status)}</button></div></div></article>`;
 }
 function taskRow(t) {
   const c = state.contributions.find((c) => c.task === t.id);
-  return `<div class="task-row"><span class="task-check ${t.status === "verified" ? "complete" : ""}">${t.status === "verified" ? "✓" : "○"}</span><div><strong>${esc(t.title)}</strong><small>${esc(t.eventTitle || "Community contribution")} ${unit()?.isLeader ? " · " + esc(t.assigneeName) : ""}</small></div><div class="task-right">${t.status === "open" ? `<span class="due">Due ${date(t.due)}</span>${t.assignee === state.user.id ? `<button class="text-button" data-action="submit" data-id="${t.id}">${c?.status === "returned" ? "Resubmit" : "Submit work"} →</button>` : ""}` : badge(t.status)}</div></div>`;
+  const overdue = openTask(t) && t.due < today();
+  return `<article class="task-row ${t.status === "blocked" ? "task-blocked" : ""}"><span class="task-check ${t.status === "verified" ? "complete" : ""}" aria-hidden="true">${t.status === "verified" ? "✓" : "○"}</span><div class="task-copy"><div class="task-status-line">${badge(c?.status === "returned" ? "returned" : t.status)} ${overdue ? '<span class="overdue-label">Overdue</span>' : ""}</div><strong>${esc(t.title)}</strong><small>${esc(t.eventTitle || "Community contribution")} ${unit()?.isLeader ? " · " + esc(t.assigneeName) : ""}${t.eventStatus === "cancelled" ? " · Event cancelled" : ""}</small>${t.progressNote && openTask(t) ? `<p class="progress-note">${esc(t.progressNote)}</p>` : ""}${c?.status === "returned" ? `<div class="return-note"><strong>Clarification requested</strong>${esc(c.note)}</div>` : ""}</div><div class="task-right"><span class="due">Due ${date(t.due)}</span>${openTask(t) && t.assignee === state.user.id ? `<button class="text-button" data-action="task-progress" data-id="${t.id}">Update progress</button><button class="button secondary small-button" data-action="submit" data-id="${t.id}">${c?.status === "returned" ? "Resubmit work" : "Submit work"} →</button>` : ""}</div></article>`;
 }
 function home() {
-  const tasks = mine().filter((t) => t.status === "open"),
-    upcoming = state.events.filter(
-      (e) => !["closed", "cancelled", "completed"].includes(e.status),
-    ),
+  const tasks = mine().filter(openTask),
+    upcoming = state.events.filter(upcomingEvent),
     verified = state.contributions.filter(
       (c) => c.user === state.user.id && c.status === "verified",
     );
-  return `${heading("LET’S MAKE TODAY MATTER", `Good to see you, ${esc(state.user.name.split(" ")[0])}.`, "Your community is moving forward. Here’s where you come in.", unit()?.isLeader ? button("+ Create event", "create-event", "primary") : button("Explore events ↗", "events", "secondary"))}<section class="hero"><div><span class="hero-label">CONNECTED BY PURPOSE</span><h2>Your time. Your effort.<br><em>A stronger community.</em></h2><p>Show up for what matters. Find your next opportunity<br class="desktop-only"> to make a difference, with people who care.</p><button class="button light" data-nav="events">Find your next event <span>↗</span></button></div><div class="hero-art" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><span class="hero-sun">✳</span><div class="hero-ticket"><span>↗</span><strong>Better,<br>together.</strong><small>ONE CONTRIBUTION AT A TIME</small></div><div class="hero-dot"></div></div></section><section class="stats" aria-label="Your activity"><div><span class="stat-icon orange">▦</span><div><strong>${upcoming.length.toString().padStart(2, "0")}</strong><span>Upcoming events</span></div></div><div><span class="stat-icon green">✓</span><div><strong>${tasks.length.toString().padStart(2, "0")}</strong><span>Tasks to take forward</span></div></div><div><span class="stat-icon purple">♧</span><div><strong>${verified.length.toString().padStart(2, "0")}</strong><span>Verified contributions</span></div></div></section><div class="dashboard-grid"><div><section><div class="section-title"><div><h2>Coming up in your community</h2><p>Good things to be a part of.</p></div><button class="text-button" data-nav="events">All events ↗</button></div><div class="event-grid">${
+  return `${heading("LET’S MAKE TODAY MATTER", `Good to see you, ${esc(state.user.name.split(" ")[0])}.`, "Your community is moving forward. Here’s where you come in.", unit()?.isLeader ? button("+ Create event", "create-event", "primary") : button("Explore events ↗", "events", "secondary"))}<section class="hero"><div><span class="hero-label">CONNECTED BY PURPOSE</span><h2>Your time. Your effort.<br><em>A stronger community.</em></h2><p>Show up for what matters. Find your next opportunity<br class="desktop-only"> to make a difference, with people who care.</p><button class="button light" data-nav="events">Find your next event <span>↗</span></button></div><div class="hero-art" aria-hidden="true"><div class="orbit one"></div><div class="orbit two"></div><span class="hero-sun">✳</span><div class="hero-ticket"><span>↗</span><strong>Better,<br>together.</strong><small>ONE CONTRIBUTION AT A TIME</small></div><div class="hero-dot"></div></div></section>${focusPanel()}<section class="stats" aria-label="Your activity"><div><span class="stat-icon orange">▦</span><div><strong>${upcoming.length.toString().padStart(2, "0")}</strong><span>Upcoming events</span></div></div><div><span class="stat-icon green">✓</span><div><strong>${tasks.length.toString().padStart(2, "0")}</strong><span>Tasks to take forward</span></div></div><div><span class="stat-icon purple">♧</span><div><strong>${verified.length.toString().padStart(2, "0")}</strong><span>Verified contributions</span></div></div></section><div class="dashboard-grid"><div><section><div class="section-title"><div><h2>Coming up in your community</h2><p>Good things to be a part of.</p></div><button class="text-button" data-nav="events">All events ↗</button></div><div class="event-grid">${
     upcoming
       .slice(0, 2)
       .map((e) => eventCard(e, true))
@@ -138,45 +207,85 @@ function home() {
       .join("") || "<p>No updates yet. Share the first one.</p>"
   }<button class="text-button" data-nav="community">Visit your community →</button></section><section class="journey-note"><span class="eyebrow">YOUR STORY IS TAKING SHAPE</span><div class="journey-flower" aria-hidden="true">♧</div><h2>Every effort<br>leaves a mark.</h2><p>Your contributions become part of a journey you can look back on.</p><button class="text-button" data-nav="journey">See my journey ↗</button></section></aside></div>`;
 }
+function searchBox(placeholder) {
+  return `<label class="search-box"><span aria-hidden="true">⌕</span><input type="search" data-search aria-label="${placeholder}" placeholder="${placeholder}" value="${esc(searchQuery)}"></label>`;
+}
+function focusPanel() {
+  const tasks = unit()?.isLeader ? state.tasks : mine(),
+    late = tasks.filter((t) => openTask(t) && t.due < today()).length,
+    blocked = tasks.filter((t) => t.status === "blocked").length;
+  return `<section class="focus-panel" aria-label="Next actions"><div><span class="eyebrow">MAKE YOUR NEXT MOVE</span><h2>What needs your attention</h2></div><button data-action="focus-work" data-target-filter="overdue"><strong>${late}</strong><span>Overdue tasks ↗</span></button><button data-action="focus-work" data-target-filter="blocked"><strong>${blocked}</strong><span>Tasks needing help ↗</span></button>${unit()?.isLeader ? `<button data-nav="review"><strong>${pending().length}</strong><span>Waiting for review ↗</span></button>` : `<button data-action="focus-events" data-target-filter="going"><strong>${state.events.filter((e) => e.going && upcomingEvent(e)).length}</strong><span>Events you’re joining ↗</span></button>`}</section>`;
+}
 function events() {
-  let list = state.events.filter(
+  const list = state.events.filter(
     (e) =>
-      filter === "all" ||
-      (filter === "going"
-        ? e.going
-        : !["closed", "completed", "cancelled"].includes(e.status)),
+      (filter === "all" ||
+        (filter === "going"
+          ? e.going && canRSVP(e)
+          : filter === "past"
+            ? !upcomingEvent(e)
+            : upcomingEvent(e))) &&
+      searchable(e.title, e.venue, e.description),
   );
-  return `${heading("MAKE A LITTLE ROOM FOR IMPACT", "Meet up. Show up. Make a difference.", "Discover what’s happening and choose how you’d like to take part.", unit()?.isLeader ? button("+ Create event", "create-event", "primary") : "")}<div class="toolbar"><div class="tabs" aria-label="Event filters">${[
+  return `${heading("COME TOGETHER. FOLLOW THROUGH.", "Your community, in motion.", "Plan with clarity, participate freely, and record what you achieve.", unit()?.isLeader ? button("+ Create event", "create-event", "primary") : "")}<div class="toolbar event-toolbar"><div class="tabs" aria-label="Event filters">${[
     ["all", "All events"],
     ["upcoming", "Upcoming"],
     ["going", "I’m going"],
-  ]
-    .map(
-      ([key, label]) =>
-        `<button class="${filter === key ? "selected" : ""}" data-filter="${key}">${label}</button>`,
-    )
-    .join(
-      "",
-    )}</div><span class="muted">${list.length} events</span></div><div class="event-grid full">${list.map((e) => eventCard(e)).join("") || empty("No events here yet", "Try another filter or wait for your team’s next event.")}</div>`;
-}
-function work() {
-  return `${heading("SMALL STEPS. REAL PROGRESS.", unit()?.isLeader ? "Keep good work moving." : "Your next contribution starts here.", "Complete your task, describe the outcome, and submit it for a fair review.", unit()?.isLeader ? button("+ Assign task", "create-task", "primary") : "")}<div class="toolbar"><div class="tabs">${[
-    ["all", "All work"],
-    ["open", "To do"],
-    ["submitted", "In review"],
-    ["verified", "Verified"],
+    ["past", "Past & closed"],
   ]
     .map(
       ([k, l]) =>
-        `<button data-filter="${k}" class="${filter === k ? "selected" : ""}">${l}</button>`,
+        `<button aria-pressed="${filter === k}" class="${filter === k ? "selected" : ""}" data-filter="${k}">${l}</button>`,
     )
-    .join("")}</div></div><div class="card">${
-    state.tasks
-      .filter((t) => filter === "all" || t.status === filter)
-      .map(taskRow)
-      .join("") ||
-    empty("Nothing in this view", "Your assigned work will appear here.")
-  }</div><div class="info-note">◈ A verified contribution records your work. It does not create a rating, promotion, or payment.</div>`;
+    .join(
+      "",
+    )}</div>${searchBox("Search events or places")}</div><div class="results-count" role="status">${list.length} ${list.length === 1 ? "event" : "events"}${searchQuery ? " matching your search" : ""}</div><div class="event-grid full">${list.map((e) => eventCard(e)).join("") || empty("No matching events", "Try another search or filter.")}</div>`;
+}
+function work() {
+  const tasks = state.tasks.filter(
+    (t) =>
+      (filter === "all" ||
+        (filter === "overdue"
+          ? openTask(t) && t.due < today()
+          : t.status === filter)) &&
+      searchable(t.title, t.assigneeName, t.eventTitle, t.progressNote),
+  );
+  const columns = [
+    ["open", "To do"],
+    ["in_progress", "In progress"],
+    ["blocked", "Needs help"],
+    ["submitted", "In review"],
+    ["verified", "Verified"],
+  ];
+  const board = columns
+    .map(([key, label]) => {
+      const list = tasks.filter((t) => t.status === key);
+      return `<section class="board-column"><h2>${label}<span>${list.length}</span></h2>${list.map(taskRow).join("") || '<p class="board-empty">No tasks here</p>'}</section>`;
+    })
+    .join("");
+  return `${heading("MOVE GOOD WORK FORWARD", unit()?.isLeader ? "Clarity for every contribution." : "One task. A meaningful difference.", "Share progress, flag a blocker, and submit your finished work for review.", unit()?.isLeader ? button("+ Assign task", "create-task", "primary") : "")}<div class="work-summary"><span><strong>${state.tasks.filter(openTask).length}</strong> active tasks</span><span><strong>${state.tasks.filter((t) => t.status === "blocked").length}</strong> need support</span><span><strong>${state.tasks.filter((t) => t.status === "verified").length}</strong> verified</span></div><div class="toolbar work-toolbar">${searchBox("Search tasks, people or events")}<div class="view-switch" aria-label="Task view"><button data-view="list" aria-pressed="${workView === "list"}" class="${workView === "list" ? "selected" : ""}">List</button><button data-view="board" aria-pressed="${workView === "board"}" class="${workView === "board" ? "selected" : ""}">Board</button></div></div><div class="tabs work-tabs">${[["all", "All work"], ["overdue", "Overdue"], ...columns].map(([k, l]) => `<button data-filter="${k}" aria-pressed="${filter === k}" class="${filter === k ? "selected" : ""}">${l}</button>`).join("")}</div><div class="results-count" role="status">${tasks.length} ${tasks.length === 1 ? "task" : "tasks"}</div>${workView === "board" ? `<div class="task-board">${board}</div>` : `<div class="card">${tasks.map(taskRow).join("") || empty("No matching tasks", "Try another search or filter.")}</div>`}`;
+}
+function eventWorkspace() {
+  if (!eventDetail)
+    return '<div class="loading-state" role="status">Opening event workspace…</div>';
+  const d = eventDetail,
+    e = d.event,
+    isLeader = unit()?.isLeader;
+  const steps = ["published", "ready", "active", "completed", "closed"],
+    position = steps.indexOf(e.status);
+  const next = {
+    published: ["ready", "Mark ready"],
+    ready: ["active", "Start event"],
+    active: ["completed", "Complete event"],
+    completed: ["closed", "Close event"],
+  }[e.status];
+  const progress = steps
+    .map(
+      (step, i) =>
+        `<li class="${i <= position ? "done" : ""}" ${step === e.status ? 'aria-current="step"' : ""}><span>${i < position ? "✓" : i + 1}</span>${step === "published" ? "Published" : step === "ready" ? "Ready" : step === "active" ? "Active" : step === "completed" ? "Completed" : "Closed"}</li>`,
+    )
+    .join("");
+  return `<button class="text-button back-link" data-nav="events">← All events</button><div class="event-workspace-heading"><div><div class="event-heading-meta">${badge(e.status)}<span>${esc(unit().name)}</span></div><h1>${esc(e.title)}</h1><p>⌖ ${esc(e.venue)} <span>·</span> ${date(e.date, { weekday: "long", month: "short", day: "numeric" })} at ${new Date(e.date).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit", timeZoneName: "short" })}</p></div><div class="heading-actions">${canRSVP(e) ? `<button class="button ${e.going ? "secondary" : "primary"}" data-action="rsvp" data-id="${e.id}">${e.going ? "✓ Going · Withdraw" : "RSVP to this event →"}</button>` : ""}</div></div>${d.cancellation ? `<div class="notice warning"><strong>This event has been cancelled</strong><p>${esc(d.cancellation.reason)}</p></div>` : `<ol class="event-stepper" aria-label="Event lifecycle">${progress}</ol>`}<div class="event-workspace-grid"><div><section class="card padded event-about"><h2>About this gathering</h2><p>${esc(e.description)}</p><div class="event-facts"><div><strong>${e.attending}<small> / ${e.capacity}</small></strong><span>RSVPs confirmed</span></div><div><strong>${d.attendanceCount}</strong><span>Attendance confirmed</span></div><div><strong>${d.tasks.filter((t) => t.status === "verified").length}<small> / ${d.tasks.length}</small></strong><span>${isLeader ? "Team tasks verified" : "Your tasks verified"}</span></div></div>${!isLeader && d.myAttendance !== null ? `<p class="attendance-notice">${d.myAttendance ? "✓ Your attendance is confirmed." : "Your attendance is currently marked absent."} Contact the organizer for corrections.</p>` : ""}</section><section class="event-tasks"><div class="section-title"><h2>${isLeader ? "The work behind the event" : "Your event tasks"}</h2>${isLeader && e.status !== "closed" && e.status !== "cancelled" ? button("+ Assign task", "create-task", "secondary small-button") : ""}</div><div class="card">${d.tasks.map((t) => taskRow(state.tasks.find((item) => item.id === t.id) || t)).join("") || empty("No tasks yet", isLeader ? "Assign responsibilities so everyone knows the next step." : "Your assigned event tasks will appear here.")}</div></section>${isLeader ? `<section class="card padded attendance-section"><div class="section-title"><div><h2>People showing up</h2><p>Organizer-confirmed attendance. Corrections remain available until closure.</p></div><span class="count-chip">${d.attendees.length}</span></div>${d.attendees.map((p) => `<div class="attendance-row"><span class="avatar">${initials(p.name)}</span><div><strong>${esc(p.name)}</strong><small>${p.present ? "Attendance confirmed" : "RSVP confirmed"}</small></div>${["active", "completed"].includes(e.status) ? `<button class="button ${p.present ? "secondary" : "primary"} small-button" data-action="attendance" data-id="${p.id}" data-present="${!p.present}">${p.present ? "Undo check-in" : "Check in"}</button>` : badge(p.present ? "present" : "registered")}</div>`).join("") || '<p class="muted">Members will appear here when they RSVP.</p>'}</section>` : ""}<section class="card padded outcome-section"><div class="section-title"><h2>What we achieved</h2>${isLeader && e.status === "completed" ? button(d.outcome ? "Edit outcome" : "Record outcome", "outcome", "secondary small-button") : ""}</div>${d.outcome ? `<p class="outcome-copy">${esc(d.outcome.summary)}</p><h3>What happens next</h3><p class="outcome-copy">${esc(d.outcome.follow_up)}</p><small class="muted">Updated ${date(d.outcome.updated)}</small>` : '<p class="muted">After the event, record the outcomes and a follow-up plan before closing it.</p>'}</section></div><aside><section class="card padded organizer-panel"><p class="eyebrow">${isLeader ? "ORGANIZER DESK" : "EVENT READINESS"}</p><h2>${e.status === "cancelled" ? "Event cancelled" : e.status === "closed" ? "A chapter completed" : next ? next[1] : "Event progress"}</h2><p>${isLeader ? "Keep the team informed as the event moves forward." : "Your organizer coordinates permissions, attendance, and follow-ups."}</p><div class="readiness-item"><span>${d.permitValid ? "✓" : "!"}</span><div><strong>${e.permit === "not_required" ? "No permit required" : d.permitValid ? "Permission verified" : "Permission needs attention"}</strong><small>${e.permit === "not_required" ? "Recorded by the organizer" : d.permit?.valid_until ? "Valid until " + date(d.permit.valid_until) : "Readiness requires a recorded review."}</small></div></div>${e.permit !== "not_required" && isLeader && ["published", "ready"].includes(e.status) ? button("Review permission", "permit", "secondary wide") : ""}${d.permit ? `<dl class="permit-summary"><dt>Issuing authority</dt><dd>${esc(d.permit.issuer)}</dd><dt>Reference</dt><dd>${esc(d.permit.reference)}</dd><dt>Conditions</dt><dd>${esc(d.permit.conditions)}</dd></dl>` : ""}${isLeader && next ? `<button class="button primary wide" data-action="event-status" data-id="${e.id}" data-status="${next[0]}" ${(["ready", "active"].includes(next[0]) && !d.permitValid) || (next[0] === "closed" && !d.outcome) ? "disabled" : ""}>${next[1]} →</button>${next[0] === "closed" && !d.outcome ? '<p class="fine">Record the outcome and follow-up plan to enable closure.</p>' : ""}` : ""}${isLeader && ["published", "ready", "active"].includes(e.status) ? '<button class="text-button danger cancel-link" data-action="cancel-event">Cancel this event</button>' : ""}</section>${isLeader ? `<section class="card padded event-history"><h2>Activity log</h2>${d.history.map((h) => `<div><span class="history-dot"></span><p><strong>${esc(h.action.replace("event.", "").replaceAll("_", " "))}</strong><small>${esc(h.actorName || "Organizer")} · ${date(h.created)}</small></p></div>`).join("") || '<p class="muted">New event decisions will appear here.</p>'}</section>` : ""}</aside></div>`;
 }
 function journey() {
   const contributions = state.contributions.filter(
@@ -219,6 +328,9 @@ function textarea(label, name) {
 let selectedId;
 async function action(name, target) {
   selectedId = target?.dataset.id || selectedId;
+  if (name === "focus-work")
+    return navigate("work", target.dataset.targetFilter);
+  if (name === "focus-events") return navigate("events", "going");
   if (name === "close") return $("#modal").close();
   if (name.startsWith("login-")) {
     await api("login", { demoRole: name.slice(6) });
@@ -239,19 +351,77 @@ async function action(name, target) {
       e.going ? "RSVP withdrawn" : "You’re on the list. See you there!",
     );
   }
-  if (name === "event") {
-    const e = state.events.find((e) => e.id === selectedId);
-    const next = {
-      published: "ready",
-      ready: "active",
-      active: "completed",
-      completed: "closed",
-    }[e.status];
+  if (name === "event") return navigate("event/" + selectedId);
+  if (name === "attendance") {
+    await api(`events/${eventId()}/attendance`, {
+      user: selectedId,
+      present: target.dataset.present === "true",
+    });
+    await refresh();
+    return toast("Attendance updated");
+  }
+  if (name === "task-progress") {
+    const t = state.tasks.find((t) => t.id === selectedId);
     return modal(
-      esc(e.title),
-      `<p class="event-meta">${date(e.date, { weekday: "long", day: "numeric", month: "long" })} · ${new Date(e.date).toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}</p><p>${esc(e.description)}</p><p>⌖ ${esc(e.venue)}</p><p>${e.attending} / ${e.capacity} attending · ${badge(e.status)}</p><div class="info-note">External permission: ${esc(e.permit.replaceAll("_", " "))}. ${e.permit === "pending" ? "This is a preliminary invitation. Readiness is blocked until a permit is verified." : ""}</div><div class="modal-actions"><button class="button primary" data-action="rsvp" data-id="${e.id}">${e.going ? "Withdraw RSVP" : "Count me in"}</button>${unit()?.isLeader && next ? `<button class="button secondary" data-action="event-status" data-id="${e.id}" data-status="${next}">Mark ${next}</button>` : ""}</div>`,
+      "Move your work forward",
+      form(
+        `<p>${esc(t.title)}</p><label>Progress<select name="status">${[
+          ["open", "To do"],
+          ["in_progress", "In progress"],
+          ["blocked", "I need help"],
+        ]
+          .map(
+            ([v, l]) =>
+              `<option value="${v}" ${t.status === v ? "selected" : ""}>${l}</option>`,
+          )
+          .join(
+            "",
+          )}</select></label>${textarea("What’s changed, or what support do you need?", "note")}`,
+        "task-progress",
+        "Save progress",
+      ),
     );
   }
+  if (name === "permit") {
+    const p = eventDetail.permit;
+    modal(
+      "Review external permission",
+      form(
+        `<p>Record evidence you have inspected. This records your review; it does not obtain permission from an authority.</p><label>Decision<select name="status"><option value="approved">Verified and approved</option><option value="rejected">Rejected</option></select></label>${field("Issuing authority", "issuer")}${field("Permit or document reference", "reference")}<div data-permit-expiration>${field("Valid until (your local time)", "validUntil", "datetime-local")}</div>${textarea("Conditions or review note", "conditions")}<label class="checkbox"><input type="checkbox" name="confirmed" required> I inspected the evidence and confirmed this decision.</label>`,
+        "permit",
+        "Save permission review",
+      ),
+    );
+    if (p) {
+      for (const k of ["issuer", "reference", "conditions"])
+        $('#modal [name="' + k + '"]').value = p[k];
+    }
+    return;
+  }
+  if (name === "outcome") {
+    modal(
+      "Turn participation into progress",
+      form(
+        `${textarea("What did the event achieve?", "summary")}${textarea("Follow-up actions, owners and next steps", "followUp")}`,
+        "outcome",
+        "Save event outcome",
+      ),
+    );
+    if (eventDetail.outcome) {
+      $('#modal [name="summary"]').value = eventDetail.outcome.summary;
+      $('#modal [name="followUp"]').value = eventDetail.outcome.follow_up;
+    }
+    return;
+  }
+  if (name === "cancel-event")
+    return modal(
+      "Cancel this event?",
+      form(
+        `${textarea("Reason to share with your team", "reason")}<p class="fine">RSVP changes will close and an official cancellation update will appear on the team board. Previous records remain available.</p>`,
+        "cancel-event",
+        "Confirm cancellation",
+      ),
+    );
   if (name === "event-status") {
     await api(`events/${selectedId}/status`, { status: target.dataset.status });
     $("#modal").close();
@@ -260,10 +430,14 @@ async function action(name, target) {
   }
   if (name === "submit") {
     const t = state.tasks.find((t) => t.id === selectedId);
-    return modal(
+    modal(
       "Share your contribution",
-      `<p>${esc(t.title)}</p>${form(textarea("What did you do, and what was the outcome?", "summary"), "submit", "Submit for verification →")}<p class="fine">Include the work you completed and any relevant context. Your team leader will review it.</p>`,
+      `<p>${esc(t.title)}</p>${state.contributions.find((c) => c.task === t.id)?.status === "returned" ? `<div class="return-note">${esc(state.contributions.find((c) => c.task === t.id).note)}</div>` : ""}${form(textarea("What did you do, and what was the outcome?", "summary"), "submit", "Submit for verification →")}<p class="fine">Include the work you completed and any relevant context. Your team leader will review it.</p>`,
     );
+    const previous = state.contributions.find((c) => c.task === t.id);
+    if (previous?.status === "returned")
+      $('#modal [name="summary"]').value = previous.summary;
+    return;
   }
   if (name === "review")
     return modal(
@@ -278,7 +452,7 @@ async function action(name, target) {
     return modal(
       "Bring your community together",
       form(
-        `${field("Event title", "title")}${textarea("What will we do?", "description")}${field("Meeting place", "venue")}${field("Date and time (local)", "date", "datetime-local")}${field("Capacity", "capacity", "number")}<label class="checkbox"><input type="checkbox" name="requiresPermit"> This event needs an external permit</label><p class="fine">Permit tracking is manual. Events needing a permit cannot be marked ready in this release.</p>`,
+        `${field("Event title", "title")}${textarea("What will we do?", "description")}${field("Meeting place", "venue")}${field("Date and time (local)", "date", "datetime-local")}${field("Capacity", "capacity", "number")}<label class="checkbox"><input type="checkbox" name="requiresPermit"> This event needs an external permit</label><p class="fine">Record permission evidence in the event workspace before marking the event ready.</p>`,
         "create-event",
         "Publish event →",
       ),
@@ -287,7 +461,13 @@ async function action(name, target) {
     return modal(
       "Make the next step clear",
       form(
-        `${field("Task title", "title")}<label>Assign to<select name="assignee">${state.people.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></label><label>Related event<select name="event"><option value="">No event</option>${state.events.map((e) => `<option value="${e.id}">${esc(e.title)}</option>`).join("")}</select></label>${field("Due date", "due", "date")}`,
+        `${field("Task title", "title")}<label>Assign to<select name="assignee">${state.people.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select></label><label>Related event<select name="event"><option value="">No event</option>${state.events
+          .filter((e) => !["closed", "cancelled"].includes(e.status))
+          .map(
+            (e) =>
+              `<option value="${e.id}" ${eventId() === e.id ? "selected" : ""}>${esc(e.title)}</option>`,
+          )
+          .join("")}</select></label>${field("Due date", "due", "date")}`,
         "create-task",
         "Assign task →",
       ),
@@ -373,6 +553,12 @@ document.addEventListener("click", async (e) => {
     render();
     return;
   }
+  const view = e.target.closest("[data-view]");
+  if (view) {
+    workView = view.dataset.view;
+    render();
+    return;
+  }
   const t = e.target.closest("[data-action]");
   if (!t) return;
   t.disabled = true;
@@ -380,6 +566,11 @@ document.addEventListener("click", async (e) => {
     await action(t.dataset.action, t);
     if (t.dataset.action === "rsvp" && $("#modal").open) $("#modal").close();
   } catch (err) {
+    if (err.status === 401) {
+      state = null;
+      $("#modal").close();
+      login();
+    }
     toast(err.message);
   } finally {
     t.disabled = false;
@@ -407,31 +598,11 @@ document.addEventListener("submit", async (e) => {
     } else if (formEl.id === "login-form") await api("login", values);
     else {
       const type = formEl.dataset.form;
-      const routes = {
-        submit: [
-          "contributions",
-          { task: selectedId, summary: values.summary },
-        ],
-        review: ["contributions/review", { id: selectedId, ...values }],
-        "create-event": [
-          "events",
-          {
-            ...values,
-            unit: unit()?.id,
-            date: new Date(values.date).toISOString(),
-            capacity: Number(values.capacity),
-            requiresPermit: values.requiresPermit === "on",
-          },
-        ],
-        "create-task": ["tasks", { ...values, unit: unit()?.id }],
-        "create-post": [
-          "posts",
-          { ...values, unit: unit()?.id, official: values.official === "true" },
-        ],
-        profile: ["profile", values],
-        leave: ["leave", { unit: unit()?.id }],
-      };
-      const [route, body] = routes[type];
+      const [route, body] = formPayload(type, values, {
+        unit: unit()?.id,
+        selectedId,
+        eventId: eventId(),
+      });
       await api(route, body);
       $("#modal").close();
       toast("Saved successfully");
@@ -444,10 +615,21 @@ document.addEventListener("submit", async (e) => {
     if (submit) submit.disabled = false;
   }
 });
-window.addEventListener("hashchange", () => {
-  page = location.hash.slice(1) || "home";
-  filter = "all";
-  if (state) render();
+document.addEventListener("change", (event) => {
+  if (!event.target.matches('[data-form="permit"] [name="status"]')) return;
+  const rejected = event.target.value === "rejected";
+  $("#modal [data-permit-expiration]").hidden = rejected;
+  $('#modal [name="validUntil"]').required = !rejected;
+});
+window.addEventListener("hashchange", changeRoute);
+document.addEventListener("input", (e) => {
+  if (!e.target.matches("[data-search]")) return;
+  const cursor = e.target.selectionStart;
+  searchQuery = e.target.value;
+  render();
+  const input = $("[data-search]");
+  input?.focus();
+  input?.setSelectionRange(cursor, cursor);
 });
 (async () => {
   try {

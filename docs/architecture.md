@@ -20,7 +20,11 @@ This is not sufficient for production political membership data. Contact ownersh
 
 Journey sharing shows only verified contributions for the currently shared unit. Team exit ends that unit's future access to the member's shared journey. Personal history remains accessible to its owner; retention/deletion rules must be established before real use. Revocation cannot recall already viewed or downloaded information.
 
-Pending permit events remain preliminary and cannot become ready. No permit upload is treated as government approval. The evidence-review adapter is intentionally unavailable; do not change the database manually to bypass this release boundary for real events.
+Pending permit events remain preliminary. Appointed organizers record manually inspected evidence with an issuer, reference, validity and conditions. Readiness and starting the event both require a recorded approval valid through the event date and current time. Re-review resets readiness, and prior permit decisions are retained. This is internal evidence tracking, not an authority integration or a guarantee of permission. Media/document attachments are not yet implemented.
+
+The event workflow module owns detailed event views, attendance, permission review, outcomes and lifecycle changes. Attendance rosters and evidence references are restricted to appointed team leaders; members see aggregate attendance and their own status. Completed events require an outcome and follow-up plan before closure. Cancellation publishes an official team-board notice. Notifications outside the app are not integrated.
+
+Schema upgrades add tables and indexes on startup without rebuilding existing user data. Existing events are preserved; any legacy approved permit without recorded validity must be reviewed before readiness/start. Frontend form payloads are built in a separately tested module so unrelated form fields are never evaluated.
 
 ## Deployment
 

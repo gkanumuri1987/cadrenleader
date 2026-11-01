@@ -2,7 +2,7 @@
 
 A responsive web application for voluntary community participation. Members join a private team, RSVP to events, complete assigned work, submit a contribution, and retain a personal journey. Appointed leaders coordinate work and independently review contributions.
 
-**Status: working pilot foundation, not cleared for sensitive production data.** This implements the first vertical slice of the Leadership and Cadre Platform Plan. It does not implement the full ten-page roadmap or claim security certification.
+**Version 0.2 — coordination workspace. Status: working pilot foundation, not cleared for sensitive production data.** This implements the first vertical slice of the Leadership and Cadre Platform Plan. It does not implement the full ten-page roadmap or claim security certification.
 
 ## Run locally
 
@@ -31,8 +31,8 @@ For a shorter demo, use the preassigned welcome-desk task with the built-in memb
 - Password authentication using salted scrypt; hashed, expiring server sessions; HttpOnly/SameSite cookies; logout; login attempt limits.
 - Single-use invitation onboarding, explicit voluntary joining, membership requests for rejoining, leader approval, and voluntary exit.
 - Server-enforced membership scope and separate leader appointments. Billing cannot create authority.
-- Events with capacity-limited idempotent RSVP, withdrawal, ordered lifecycle, and pending-permit readiness blocking.
-- Task assignment, contribution submission, duplicate prevention, independent review, returns, corrections, audit entries and correction snapshots.
+- Searchable event directory and dedicated event workspaces with capacity-limited RSVP, organizer attendance and corrections, permission evidence reviews, expiry checks, outcomes, closure gates, cancellation announcements, and activity history.
+- Searchable task lists and boards, assignee progress updates, blocker notes, overdue filters, contribution submission, independent review, and corrections with the original reviewer explanation preserved.
 - Personal journey and consent-based sharing of verified records within the active team. Private is the default.
 - Member and official team text posts with server checks for official identity.
 - Responsive keyboard-accessible interface, native form validation, accessible dialogs, error messages, and an app manifest. The manifest supports standalone presentation on compatible browsers; offline use and native apps are not implemented.
@@ -65,14 +65,14 @@ npm run check
 npm test
 ```
 
-Tests use isolated in-memory databases and exercise authorization and complete HTTP workflows, including revoked access, invitations, duplicate submissions, permit blocking, privacy boundaries, cross-origin writes and logout. These tests are not a penetration test.
+Tests include browser-form payload regressions and use isolated in-memory databases and exercise authorization and complete HTTP workflows, including revoked access, invitations, duplicate submissions, permit blocking, privacy boundaries, cross-origin writes and logout. These tests are not a penetration test. Version 0.2 was also checked in the browser for task progress, contribution submission, organizer attendance and event outcomes. See [review and changes](docs/review-0.2.md).
 
 ## Required before a real pilot
 
 - Managed identity/contact verification, passkeys or MFA for leaders, recovery, invitation controls and abuse prevention.
 - Validated Telugu translations, language preference controls, and native-speaker usability review. This release is English only.
 - Organization administration, deep hierarchy and transfer/appointment workflows, handover, removal appeals, moderation and reporting.
-- Private media processing/storage, safe upload recovery, attendance corrections, evidence attachments and permit review/expiry.
+- Private media processing/storage, safe upload recovery and evidence attachments. Permission review currently records manually inspected evidence references; it does not contact an issuing authority.
 - Data retention/deletion/export policy and workflows, consent/privacy notice reviewed for the launch jurisdiction, independent authorization/security review, encrypted backups and a proven restore process.
 - HTTPS hosting, monitoring, distributed rate limiting, pagination, load/accessibility testing and deployment operations.
 
