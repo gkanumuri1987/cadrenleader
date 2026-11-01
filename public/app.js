@@ -356,6 +356,11 @@ async function action(name, target) {
   }
 }
 document.addEventListener("click", async (e) => {
+  if (e.target.closest(".skip")) {
+    e.preventDefault();
+    $("#main")?.focus();
+    return;
+  }
   const nav = e.target.closest("[data-nav]");
   if (nav) {
     e.preventDefault();
